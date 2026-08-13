@@ -261,6 +261,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 			_broker_created: rec.brokerCreated,
 			_root_pid: rec.pid,
 			_root_created: rec.rootCreated,
+			_input_mode: rec.inputMode,
 			cleanup_token: cleanupToken,
 			...extra,
 		};
@@ -384,7 +385,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 		name: "silent_spawn",
 		label: "Silent Spawn",
 		description:
-			"Start a GUI on a private desktop that does not steal the user's screen. Returns session_id. Call silent_wait for a window.",
+			"Start a GUI on a private desktop that does not steal the user's screen. Returns session_id and input_mode: 'inject' can drive polling engines and hold keys; 'message' only reaches windows that honor window messages. Pass inject_dll64/inject_dll32 (path to a payload DLL) to enable injection, or omit for message mode. Call silent_wait for a window.",
 		parameters: Type.Object({
 			exe: Type.String({ description: "Executable path or name, e.g. notepad.exe" }),
 			cwd: Type.Optional(Type.String({ description: "Working directory; defaults to this call's cwd" })),
@@ -392,6 +393,18 @@ export default function piSilentGui(pi: ExtensionAPI) {
 			allow_elevated: Type.Optional(
 				Type.Boolean({
 					description: "Only when Pi is already elevated; never opens UAC",
+				}),
+			),
+			inject_dll64: Type.Optional(
+				Type.String({
+					description:
+						"Path to the 64-bit payload DLL to inject so clicks/keys drive polling engines. Overrides the PI_SILENT_GUI_INJECT_DLL64 env default; omit both for message mode.",
+				}),
+			),
+			inject_dll32: Type.Optional(
+				Type.String({
+					description:
+						"Path to the 32-bit payload DLL, used when the target is 32-bit (common for galgame). Overrides PI_SILENT_GUI_INJECT_DLL32.",
 				}),
 			),
 		}),
@@ -414,6 +427,8 @@ export default function piSilentGui(pi: ExtensionAPI) {
 					cwd: targetCwd,
 					args: params.args,
 					allow_elevated: params.allow_elevated,
+					inject_dll32: params.inject_dll32,
+					inject_dll64: params.inject_dll64,
 					owner_pid: process.pid,
 					cleanup_token: cleanupToken,
 				},
@@ -483,6 +498,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 				pid: validated.rec.pid,
 				tmp_dir: validated.rec.tmpDir,
 				registered: true,
+				input_mode: validated.rec.inputMode,
 				...publicWindow(result.data),
 			});
 		},
@@ -492,7 +508,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 		name: "silent_wait",
 		label: "Silent Wait",
 		description:
-			"Wait until a matching window exists. Returns the session snapshot: alive, exit_code, and all top-level windows. Failures include the same snapshot.",
+			"Wait until a matching window exists. Returns input_mode and the session snapshot: alive, exit_code, and all top-level windows. Failures include the same snapshot.",
 		parameters: Type.Object({
 			session_id: Type.String(),
 			title: Type.Optional(Type.String({ description: "Title substring" })),
@@ -528,6 +544,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 				}
 				return textResult({
 					session_id: sessionId,
+					input_mode: rec.inputMode,
 					...publicWindow(result.data),
 					...publicSnapshot(result.data),
 				});
@@ -680,7 +697,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 	inputTool(
 		"silent_click",
 		"Silent Click",
-		"Left-click using coordinates from the last silent_capture PNG. (0,0) is the window top-left. Repeat the same point with count.",
+		"Left-click using coordinates from the last silent_capture PNG. (0,0) is the window top-left. Repeat the same point with count. In a message-mode session the click is a window message that engines polling raw input (many Unity/DirectInput games) may ignore; if two or three clicks change nothing on the next capture, stop and report instead of retrying.",
 		Type.Object({
 			session_id: Type.String(),
 			x: Type.Integer({ description: "PNG x coordinate" }),
@@ -751,7 +768,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 	inputTool(
 		"silent_key",
 		"Silent Key",
-		"Press a named key such as return, tab, escape, backspace, left, or delete. Repeat the same key with count.",
+		"Press a named key such as return, tab, escape, backspace, left, or delete. Repeat the same key with count. In an inject-mode session, hold_ms holds the key down (e.g. hold control to skip); message-mode keys may be ignored by engines that poll raw input.",
 		Type.Object({
 			session_id: Type.String(),
 			key: Type.String({ description: "Key name, e.g. return, tab, escape" }),
@@ -763,6 +780,14 @@ export default function piSilentGui(pi: ExtensionAPI) {
 					minimum: 1,
 					maximum: 2_000,
 					description: "Delay between repeats; default 300 when count > 1",
+				}),
+			),
+			hold_ms: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					maximum: 10_000,
+					description:
+						"Inject sessions only: hold the key down this long, e.g. hold control to skip. Rejected in message sessions.",
 				}),
 			),
 			title: Type.Optional(Type.String()),
@@ -778,6 +803,7 @@ export default function piSilentGui(pi: ExtensionAPI) {
 				key: params.key,
 				count: params.count,
 				interval_ms: params.interval_ms,
+				hold_ms: params.hold_ms,
 				title: params.title,
 				window_class: params.window_class,
 				hwnd: params.hwnd,

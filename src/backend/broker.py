@@ -30,6 +30,11 @@ from process import (
     process_is_elevated_from_handle,
 )
 
+# Injected pre-resume, so the payload should connect almost immediately. Keep the
+# wait short: this sits inside the launcher's broker-ready budget, and a slow or
+# absent handshake means message mode, not a spawn failure worth blocking on.
+INPUT_HANDSHAKE_TIMEOUT_SECONDS = 3.0
+
 
 def _check_audio_guard(guard, *, require_ready: bool = False) -> None:
     fatal = guard.fatal_error()
@@ -92,6 +97,9 @@ def run_broker(params: dict) -> int:
     thread_handle: int | None = None
     assigned = False
     guard = None
+    input_mode = "message"
+    input_writer = None
+    handshake = None
     error: Exception | None = None
     cleanup_errors: list[str] = []
     state: dict = {
@@ -113,6 +121,18 @@ def run_broker(params: dict) -> int:
         audio_device_policy = str(params.get("audio_device_policy") or "dynamic")
         clean_env = params.get("clean_env", True) is True
         target_cwd = str(params.get("cwd") or os.getcwd())
+        inject_dll32 = params.get("inject_dll32")
+        inject_dll64 = params.get("inject_dll64")
+        inject_requested = bool(inject_dll32 or inject_dll64)
+        target_env = params.get("env")
+        if inject_requested:
+            from inject_shm import PIPE_ENV, SHM_ENV, input_pipe_name, input_shm_name
+
+            shm_name = input_shm_name(session_id)
+            pipe_name = input_pipe_name(session_id)
+            # The payload learns its channel names from its own environment, so they
+            # must be fixed at CreateProcess time, before the target ever runs.
+            target_env = {**(target_env or {}), SHM_ENV: shm_name, PIPE_ENV: pipe_name}
         desktop, desktop_handle = create_private_desktop(
             session_id, allow_elevated=allow_elevated
         )
@@ -126,7 +146,7 @@ def run_broker(params: dict) -> int:
             job_handle,
             cwd=target_cwd,
             args=params.get("args") or [],
-            env=params.get("env"),
+            env=target_env,
             clean_env=clean_env,
             allow_elevated=allow_elevated,
         )
@@ -171,6 +191,35 @@ def run_broker(params: dict) -> int:
         _check_audio_guard(guard)
         guard.sweep()
         _check_audio_guard(guard)
+        if inject_requested:
+            # Inject only after resume. A CREATE_SUSPENDED target has no modules
+            # mapped yet — not even kernel32 — so LoadLibraryW does not exist to call
+            # remotely; the injector waits for the loader to map kernel32, then hooks
+            # land during the target's own startup, before it reads meaningful input.
+            # Audio is already armed and the window lives on the private desktop, so
+            # resuming first leaks neither sound nor pixels. Any failure is non-fatal:
+            # a message-driven game must still run, so we degrade to message mode.
+            import inject
+            from inject_ipc import HandshakeServer
+            from inject_shm import InputStateWriter
+
+            try:
+                input_writer = InputStateWriter(shm_name, create=True)
+                input_writer.arm()
+                handshake = HandshakeServer(pipe_name)
+                inject.inject_payload(process_handle, pid, inject_dll32, inject_dll64)
+                hello = handshake.wait(INPUT_HANDSHAKE_TIMEOUT_SECONDS)
+                input_mode = "inject" if hello and hello.get("ok") is True else "message"
+            except Exception:
+                input_mode = "message"
+            finally:
+                if handshake is not None:
+                    handshake.close()
+                    handshake = None
+                if input_mode != "inject" and input_writer is not None:
+                    input_writer.reset()
+                    input_writer.close()
+                    input_writer = None
         close_process_handle(thread_handle)
         thread_handle = None
         close_process_handle(process_handle)
@@ -187,6 +236,7 @@ def run_broker(params: dict) -> int:
                 "audio_device_policy": audio_device_policy,
                 "clean_env": clean_env,
                 "cwd": target_cwd,
+                "input_mode": input_mode,
                 "owner_pid": int(params["owner_pid"]),
                 "owner_created": str(params["owner_created"]),
             }
@@ -232,6 +282,15 @@ def run_broker(params: dict) -> int:
                 cleanup_errors.append(f"unassigned process cleanup failed: {cleanup_error}")
         if guard is not None:
             _close_audio_guard(guard)
+        if handshake is not None:
+            handshake.close()
+        if input_writer is not None:
+            # Release any held key before the mapping goes away; a stranded "down"
+            # would otherwise be the session's last word to a payload still polling.
+            try:
+                input_writer.reset()
+            finally:
+                input_writer.close()
         close_process_handle(thread_handle)
         close_process_handle(process_handle)
         close_job(job_handle)

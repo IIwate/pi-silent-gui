@@ -14,6 +14,9 @@ export type SessionRec = {
 	brokerCreated: string;
 	tmpDir: string;
 	targetElevated?: boolean;
+	// "inject" once a payload armed this session, else "message". Drives which
+	// dispatch the backend uses and what the model is told it can do.
+	inputMode: string;
 	startedAt: number;
 };
 
@@ -68,6 +71,7 @@ function recFrom(data: Record<string, unknown>, exe: string): SessionRec {
 		tmpDir: stringValue(data.tmp_dir) ?? "",
 		targetElevated:
 			typeof data.target_elevated === "boolean" ? data.target_elevated : undefined,
+		inputMode: data.input_mode === "inject" ? "inject" : "message",
 		startedAt: Date.now(),
 	};
 }

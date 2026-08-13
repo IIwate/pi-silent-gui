@@ -887,5 +887,46 @@ class WaitObservationTests(unittest.TestCase):
         self.assertIn("no live process", result["error"])
 
 
+class PayloadDllResolutionTests(unittest.TestCase):
+    """Injection DLL paths accept both a per-spawn param and an env default; the param
+    must win so a caller can pick a DLL without touching global config."""
+
+    def test_param_overrides_env(self) -> None:
+        with patch.dict("os.environ", {"PI_SILENT_GUI_INJECT_DLL64": r"C:\env\p64.dll"}):
+            resolved = silent_gui_module.resolve_payload_dll(
+                {"inject_dll64": r"C:\call\p64.dll"},
+                "inject_dll64",
+                "PI_SILENT_GUI_INJECT_DLL64",
+            )
+        self.assertEqual(resolved, r"C:\call\p64.dll")
+
+    def test_env_used_when_param_absent(self) -> None:
+        with patch.dict("os.environ", {"PI_SILENT_GUI_INJECT_DLL64": r"C:\env\p64.dll"}):
+            resolved = silent_gui_module.resolve_payload_dll(
+                {}, "inject_dll64", "PI_SILENT_GUI_INJECT_DLL64"
+            )
+        self.assertEqual(resolved, r"C:\env\p64.dll")
+
+    def test_empty_param_falls_back_to_env(self) -> None:
+        with patch.dict("os.environ", {"PI_SILENT_GUI_INJECT_DLL32": r"C:\env\p32.dll"}):
+            resolved = silent_gui_module.resolve_payload_dll(
+                {"inject_dll32": ""}, "inject_dll32", "PI_SILENT_GUI_INJECT_DLL32"
+            )
+        self.assertEqual(resolved, r"C:\env\p32.dll")
+
+    def test_none_when_neither_set(self) -> None:
+        with patch.dict("os.environ", {"PI_SILENT_GUI_INJECT_DLL32": ""}):
+            resolved = silent_gui_module.resolve_payload_dll(
+                {}, "inject_dll32", "PI_SILENT_GUI_INJECT_DLL32"
+            )
+        self.assertIsNone(resolved)
+
+    def test_non_string_param_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            silent_gui_module.resolve_payload_dll(
+                {"inject_dll64": 123}, "inject_dll64", "PI_SILENT_GUI_INJECT_DLL64"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

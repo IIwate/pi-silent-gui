@@ -11,7 +11,7 @@ Windows 上给 Pi 用的窄 GUI 冒烟工具。在私有桌面里启动程序，
 3. `silent_capture` — 截一张和窗口一样大的 PNG，并把同一张图作为附件回给模型。点击坐标以这张图的左上角为 `(0,0)`
 4. `silent_click` — 按 PNG 坐标点左键。同一点可传 `count` 连点
 5. `silent_type` — 往当前焦点控件打字
-6. `silent_key` — 按 `return` / `tab` / `escape` 这类有名字的键。同一键可传 `count` 连按
+6. `silent_key` — 按 `return` / `tab` / `escape` 这类有名字的键。同一键可传 `count` 连按；inject 会话还能传 `hold_ms` 长按（如按住 `control` 跳过）
 7. `silent_kill` — 杀掉进程树并删掉 session 临时目录
 
 ## 安装
@@ -81,11 +81,20 @@ pi install npm:@iiwate/pi-silent-gui
 
 自定义截图路径默认不覆盖；要覆盖就传 `overwrite: true`。
 
+## 输入模式
+
+`silent_spawn` / `silent_wait` 会返回 `input_mode`：
+
+- `message`（默认）：点击/按键走窗口消息，只对认窗口消息的引擎有效。很多轮询输入的引擎（Unity / DirectInput / RawInput，galgame 常见）不吃这套——连点两三下界面没变就该停下报告，而不是硬试。
+- `inject`：给目标注入 payload DLL，让它的输入轮询改读一块共享内存；此时点击、按键、`hold_ms` 长按对轮询引擎才真正生效。
+
+开启方式：给 `silent_spawn` 传 `inject_dll64` 路径参数（32 位目标用 `inject_dll32`）；懒得每次传，就设环境变量 `PI_SILENT_GUI_INJECT_DLL64` / `PI_SILENT_GUI_INJECT_DLL32` 当默认，**参数优先于环境变量**。两者都没有就一直是 `message`。payload 按 `src/backend/pi_silent_input.h` 的契约写；注入失败一律降级到 `message`，不会让 `silent_spawn` 失败。内部设计见 ADR 0003。
+
 ## 边界
 
 - 目标仍能访问当前用户的文件、网络和注册表
 - 部分 DirectX / Chromium / 受保护窗口会截出黑图，`all_black` 会标出来
-- 只有左键和窗口消息；不支持拖拽、组合键、OCR
+- 不支持拖拽、组合键、OCR；`message` 模式下只有左键和窗口消息，轮询输入的引擎可能不吃（见「输入模式」）
 - 工具成功只表示消息发出去了，界面变没变要再截一张图看
 
 ## 测试

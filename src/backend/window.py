@@ -195,6 +195,17 @@ def window_geometry(hwnd: int) -> dict:
     return geometry
 
 
+def window_screen_origin(hwnd: int) -> tuple[int, int]:
+    """Top-left of the window in its desktop's screen coordinates.
+
+    Inject-mode clicks fake GetCursorPos, which reports screen coordinates, so a
+    window-relative click point must be lifted back to that space. Must be called
+    on the target's desktop or the rect belongs to the wrong desktop.
+    """
+    rect = _window_rect(hwnd)
+    return int(rect.left), int(rect.top)
+
+
 def list_top_windows(pid: int) -> list[dict]:
     found: list[dict] = []
 

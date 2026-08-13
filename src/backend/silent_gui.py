@@ -54,6 +54,11 @@ _JOB_NAME_RE = re.compile(r"^pi_silent_job_([0-9a-f]{12})_[0-9a-f]{32}$")
 _DESKTOP_NAME_RE = re.compile(r"^pi_silent_([0-9a-f]{12})_[0-9a-f]{32}$")
 _CLEANUP_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 BROKER_READY_TIMEOUT_SECONDS = 10.0
+# Injection adds latency the message path never pays: after resume the broker waits
+# for the target loader to map kernel32, then for the payload handshake. Extend the
+# ready deadline only when injection is configured, so a legitimately-injecting
+# broker is not declared timed-out mid-handshake.
+INJECT_READY_HEADROOM_SECONDS = 8.0
 MAX_JSON_BYTES = 1024 * 1024
 WINDOW_WAIT_SECONDS = 5.0
 WINDOW_WAIT_POLL_SECONDS = 0.25
@@ -65,6 +70,8 @@ REPEAT_COUNT_MAX = 50
 REPEAT_INTERVAL_MS_DEFAULT = 300
 REPEAT_INTERVAL_MS_MIN = 1
 REPEAT_INTERVAL_MS_MAX = 2_000
+HOLD_MS_MIN = 1
+HOLD_MS_MAX = 10_000
 _REGISTERED_IDENTITY_KEYS = (
     "_job_name",
     "_broker_pid",
@@ -463,6 +470,20 @@ def _start_broker_input_writer(stream, payload: bytes):
     return thread, done, errors
 
 
+def resolve_payload_dll(params: dict, key: str, env_name: str) -> str | None:
+    """Resolve a payload DLL path with param-over-env precedence (SUPER-E).
+
+    An explicit spawn param wins so a caller can pick a DLL per launch; the env var is
+    the set-once default. Returns None when neither is set (message mode). Raises
+    ValueError on a malformed param so a typo fails the spawn loudly instead of silently
+    degrading to message mode.
+    """
+    value = params.get(key)
+    if value not in (None, "") and (not isinstance(value, str) or not _is_utf8_text(value)):
+        raise ValueError(f"{key} must be a valid UTF-8 string without NUL")
+    return (value or os.environ.get(env_name)) or None
+
+
 def cmd_spawn(params: dict) -> int:
     exe = params.get("exe")
     if not isinstance(exe, str) or not exe:
@@ -552,6 +573,19 @@ def cmd_spawn(params: dict) -> int:
         "owner_created": str(owner_created),
         "cleanup_token_hash": cleanup_token_hash,
     }
+    # Payload DLL paths follow SUPER-E precedence: explicit call param > environment
+    # default. A per-spawn param lets the caller pick a DLL without setting anything
+    # global. Resolved here (not in the broker) because the elevated shell-token launch
+    # path strips the environment, so the broker must receive the paths in its payload.
+    try:
+        inject_dll32 = resolve_payload_dll(params, "inject_dll32", "PI_SILENT_GUI_INJECT_DLL32")
+        inject_dll64 = resolve_payload_dll(params, "inject_dll64", "PI_SILENT_GUI_INJECT_DLL64")
+    except ValueError as error:
+        return fail(str(error))
+    if inject_dll32:
+        payload["inject_dll32"] = inject_dll32
+    if inject_dll64:
+        payload["inject_dll64"] = inject_dll64
     creation = 0x08000000 if sys.platform == "win32" else 0
     try:
         broker_input = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -564,7 +598,10 @@ def cmd_spawn(params: dict) -> int:
         )
     broker_args = [sys.executable, str(script), "broker", "--stdin-json"]
     broker_overrides = _broker_environment_overrides()
-    deadline = time.monotonic() + BROKER_READY_TIMEOUT_SECONDS
+    ready_budget = BROKER_READY_TIMEOUT_SECONDS
+    if inject_dll32 or inject_dll64:
+        ready_budget += INJECT_READY_HEADROOM_SECONDS
+    deadline = time.monotonic() + ready_budget
     proc = None
     input_thread = None
     input_done = None
@@ -794,6 +831,133 @@ def cmd_wait(params: dict) -> int:
     )
 
 
+def _optional_hold_ms(params: dict) -> int | None:
+    value = params.get("hold_ms")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not HOLD_MS_MIN <= value <= HOLD_MS_MAX:
+        raise ValueError(f"hold_ms must be an integer {HOLD_MS_MIN}..{HOLD_MS_MAX}")
+    return value
+
+
+def _dispatch_injected(
+    session_id: str,
+    action: str,
+    params: dict,
+    window: dict,
+    hwnd: int,
+    job_name: str,
+    desktop: str,
+    root_pid: int | None,
+    root_created: int | None,
+) -> int:
+    """Drive a polling engine by writing the session's shared input table.
+
+    Runs on the caller's private-desktop thread, so GetWindowRect resolves the
+    target's on-desktop origin. A missing armed table is reported as a real
+    degradation, never swallowed: the caller asked for inject input and did not
+    get it.
+    """
+    from input_dispatch import VK_LBUTTON, InjectDispatcher
+    from window import VK_NAMES, verify_window_in_pids, window_screen_origin
+
+    def identity_snapshot() -> dict:
+        return _snapshot_public(
+            _session_snapshot(job_name, desktop, root_pid=root_pid, root_created=root_created)
+        )
+
+    try:
+        count, interval_ms = _repeat_spec(params)
+        hold_ms = _optional_hold_ms(params)
+    except ValueError as error:
+        return fail(str(error), session_id=session_id)
+
+    if action == "click":
+        if "x" not in params or "y" not in params:
+            return fail("click requires x,y", session_id=session_id)
+        try:
+            x = _coordinate(params["x"], "x")
+            y = _coordinate(params["y"], "y")
+        except ValueError as error:
+            return fail(str(error), session_id=session_id)
+        width = int(window["width"])
+        height = int(window["height"])
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return fail(
+                f"click outside window: ({x},{y}) not in {width}x{height}",
+                session_id=session_id,
+            )
+        vk = VK_LBUTTON
+    else:
+        has_vk = params.get("vk") is not None
+        has_key = isinstance(params.get("key"), str) and bool(params.get("key"))
+        if has_vk == has_key:
+            return fail("key requires exactly one of vk or key", session_id=session_id)
+        if has_key:
+            key_name = str(params["key"]).lower()
+            if key_name not in VK_NAMES:
+                return fail(f"unknown key name: {params['key']}", session_id=session_id)
+            vk = VK_NAMES[key_name]
+        else:
+            try:
+                vk = _optional_vk(params.get("vk"))
+            except ValueError as error:
+                return fail(str(error), session_id=session_id)
+
+    try:
+        dispatcher = InjectDispatcher(session_id)
+    except Exception as error:
+        return fail(
+            f"inject input unavailable: {error}",
+            session_id=session_id,
+            **identity_snapshot(),
+        )
+
+    # hold_ms is a keyboard concept (e.g. hold Ctrl to skip); a click always taps.
+    key_hold = {"hold_seconds": hold_ms / 1000} if (hold_ms and action == "key") else {}
+    try:
+        origin = window_screen_origin(hwnd) if action == "click" else (0, 0)
+        for index in range(count):
+            if index:
+                time.sleep(interval_ms / 1000)
+                current_pids = query_named_job_pids(job_name)
+                if not verify_window_in_pids(hwnd, current_pids):
+                    return fail(
+                        f"window identity changed before dispatch: hwnd={hwnd} pids={current_pids}",
+                        session_id=session_id,
+                        **identity_snapshot(),
+                    )
+            if action == "click":
+                dispatcher.click(origin[0] + x, origin[1] + y, vk)
+            else:
+                dispatcher.press(vk, **key_hold)
+    finally:
+        dispatcher.close()
+
+    if action == "click":
+        return ok(
+            session_id=session_id,
+            action="click",
+            x=params["x"],
+            y=params["y"],
+            count=count,
+            window=window,
+            desktop=desktop,
+            input_mode="inject",
+            **_window_public_fields(window),
+        )
+    return ok(
+        session_id=session_id,
+        action="key",
+        key=params.get("key"),
+        count=count,
+        window=window,
+        desktop=desktop,
+        input_mode="inject",
+        **_window_public_fields(window),
+    )
+
+
 def cmd_message(params: dict) -> int:
     from desktop_ctx import on_desktop, operation_dpi_awareness
     from window import click, key, type_text, verify_window_in_pids
@@ -827,7 +991,22 @@ def cmd_message(params: dict) -> int:
                     )
                 ),
             )
+        input_mode = "inject" if params.get("_input_mode") == "inject" else "message"
+        if params.get("hold_ms") is not None and input_mode != "inject":
+            return fail("hold_ms requires an inject-mode session", session_id=session_id)
         action = params.get("action")
+        if input_mode == "inject" and action in ("click", "key"):
+            return _dispatch_injected(
+                session_id,
+                action,
+                params,
+                window,
+                hwnd,
+                job_name,
+                desktop,
+                root_pid,
+                root_created,
+            )
         if action == "click":
             if "x" not in params or "y" not in params:
                 return fail("click requires x,y")
