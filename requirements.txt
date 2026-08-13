@@ -1,0 +1,2 @@
+# Windows backend runtime dependency for WASAPI session muting.
+pycaw==20251023

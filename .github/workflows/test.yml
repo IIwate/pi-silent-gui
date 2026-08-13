@@ -1,0 +1,103 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      hardware_smoke:
+        description: Run real WASAPI and WinVer gates on an interactive self-hosted Windows runner
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  hosted:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt
+          npm install -g @earendil-works/pi-coding-agent@0.83.0
+          mkdir -p artifacts
+      - name: Unit tests
+        shell: bash
+        run: set -o pipefail; npm run test:unit 2>&1 | tee artifacts/unit.log
+      - name: Integration tests
+        shell: bash
+        run: set -o pipefail; npm run test:integration 2>&1 | tee artifacts/integration.log
+      - name: Deterministic native GUI smoke
+        shell: bash
+        run: set -o pipefail; npm run test:smoke 2>&1 | tee artifacts/native-gui-smoke.log
+      - name: Pack evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --json > artifacts/npm-pack.json 2> artifacts/npm-pack.log
+          package_file="$(node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync("artifacts/npm-pack.json", "utf8")); process.stdout.write(data[0].filename)')"
+          tar -tf "$package_file" > artifacts/npm-pack-files.txt
+          mv "$package_file" artifacts/
+      - name: Upload hosted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-windows-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  hardware:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_smoke == true }}
+    needs: hosted
+    runs-on: [self-hosted, Windows, X64, pi-silent-gui-hardware]
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install -r requirements.txt
+          npm install -g @earendil-works/pi-coding-agent@0.83.0
+          mkdir -p artifacts
+      - name: Real audio and WinVer gates
+        shell: bash
+        run: |
+          set +e
+          npm run test:audio 2>&1 | tee artifacts/audio-smoke.log
+          audio_status=${PIPESTATUS[0]}
+          npm run test:compat 2>&1 | tee artifacts/winver-compat.log
+          compat_status=${PIPESTATUS[0]}
+          exit $((audio_status || compat_status))
+      - name: Upload hardware evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-hosted-hardware-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14

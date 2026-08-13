@@ -1,0 +1,47 @@
+{
+  "name": "@iiwate/pi-silent-gui",
+  "version": "0.4.0",
+  "description": "Pi extension: start, screenshot, and drive a GUI on a private Windows desktop",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IIwate/pi-silent-gui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/IIwate/pi-silent-gui/issues"
+  },
+  "homepage": "https://github.com/IIwate/pi-silent-gui#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": ["win32"],
+  "engines": {
+    "node": ">=20.3"
+  },
+  "files": [
+    "src/*.ts",
+    "src/backend/*.py",
+    "docs/adr/*.md",
+    "requirements.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test:unit": "node --test --test-reporter=dot tests/unit/protocol.test.mjs && python -m unittest -q tests.unit.test_audio tests.unit.test_broker tests.unit.test_capture tests.unit.test_common tests.unit.test_desktop tests.unit.test_window tests.unit.test_process tests.unit.test_silent_gui",
+    "test:integration": "python -m unittest -q tests.integration.test_backend_cli tests.integration.test_broker_failures && node --test --test-reporter=dot tests/integration/extension.test.mjs",
+    "test:smoke": "python -m unittest -q tests.smoke.test_broker_lifecycle tests.smoke.test_winver.NativeWindowSmoke",
+    "test:audio": "python -m unittest -q tests.smoke.test_audio",
+    "test:compat": "python -m unittest -q tests.smoke.test_winver.WinVerSmoke",
+    "test": "npm run --silent test:unit && npm run --silent test:integration && npm run --silent test:smoke",
+    "prepublishOnly": "npm test && npm run --silent test:audio"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
