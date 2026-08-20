@@ -222,8 +222,6 @@ def run_broker(params: dict) -> int:
                     input_writer = None
         close_process_handle(thread_handle)
         thread_handle = None
-        close_process_handle(process_handle)
-        process_handle = None
         guard.sweep()
         _check_audio_guard(guard)
 
@@ -275,11 +273,17 @@ def run_broker(params: dict) -> int:
                     terminate_job(job_handle)
             except Exception as cleanup_error:
                 cleanup_errors.append(f"Job cleanup failed: {cleanup_error}")
-        if process_handle and not assigned:
+        if process_handle:
+            if not assigned:
+                try:
+                    terminate_process_handle(process_handle)
+                except Exception as cleanup_error:
+                    cleanup_errors.append(f"unassigned process cleanup failed: {cleanup_error}")
             try:
-                terminate_process_handle(process_handle)
-            except Exception as cleanup_error:
-                cleanup_errors.append(f"unassigned process cleanup failed: {cleanup_error}")
+                close_process_handle(process_handle)
+            except Exception:
+                pass
+            process_handle = None
         if guard is not None:
             _close_audio_guard(guard)
         if handshake is not None:

@@ -59,6 +59,14 @@ function pngSize(file) {
 	return [header.readUInt32BE(16), header.readUInt32BE(20)];
 }
 
+function canonicalPath(p) {
+	try {
+		return fs.realpathSync.native(p);
+	} catch {
+		return path.resolve(p);
+	}
+}
+
 test("package manifest loads Google-compatible Pi tool schemas", () => {
 	assert.deepEqual(
 		tools.map((item) => item.name),
@@ -1021,8 +1029,8 @@ test("overwrite captures serialize the same normalized path across sessions", as
 	]);
 	assert.ok(Date.now() - started >= 1000, "same-path captures overlapped");
 	assert.equal(fs.existsSync(collisionMarker), false);
-	assert.equal(body(results[0]).path, output);
-	assert.equal(body(results[1]).path, output);
+	assert.equal(canonicalPath(body(results[0]).path), canonicalPath(output));
+	assert.equal(canonicalPath(body(results[1]).path), canonicalPath(output));
 	assert.equal(fs.existsSync(output), true);
 });
 
@@ -1082,7 +1090,7 @@ test("capture overwrite defaults to reject and allows an explicit overwrite", as
 			{ cwd: workDir },
 		),
 	);
-	assert.equal(replaced.path, first.path);
+	assert.equal(canonicalPath(replaced.path), canonicalPath(first.path));
 	assert.equal(fs.existsSync(replaced.path), true);
 });
 

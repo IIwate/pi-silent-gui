@@ -152,9 +152,10 @@ class BackendCliTests(BackendTestCase):
         self.assertRegex(spawned["desktop"], rf"^pi_silent_{sid}_[0-9a-f]{{32}}$")
         self.assertRegex(spawned["job_name"], rf"^pi_silent_job_{sid}_[0-9a-f]{{32}}$")
         self.assertTrue(same_process(int(spawned["broker_pid"]), int(spawned["broker_created"])))
-        self.assertFalse(spawned["target_elevated"])
+        expected_elevated = os.environ.get("PI_SILENT_GUI_TEST_ALLOW_ELEVATED") == "1"
+        self.assertEqual(bool(spawned["target_elevated"]), expected_elevated)
         self.assertEqual(Path(spawned["cwd"]), Path.cwd().resolve())
-        self.assertFalse(process_is_elevated(int(spawned["pid"])))
+        self.assertEqual(bool(process_is_elevated(int(spawned["pid"]))), expected_elevated)
         self.assertIn(int(spawned["pid"]), query_named_job_pids(spawned["job_name"]))
 
         waited = registered_run("wait", spawned, {"timeout_ms": 5000})

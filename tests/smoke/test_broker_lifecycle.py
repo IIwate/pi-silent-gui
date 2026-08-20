@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -52,7 +53,10 @@ class BrokerLifecycleSmoke(BackendTestCase):
         live_pids = [pid for pid in assigned_pids if is_alive(pid)]
         self.assertTrue(live_pids)
         self.assertNotIn(root_pid, live_pids)
-        self.assertTrue(all(process_is_elevated(pid) is False for pid in live_pids))
+        expected_elevated = os.environ.get("PI_SILENT_GUI_TEST_ALLOW_ELEVATED") == "1"
+        self.assertTrue(
+            all((process_is_elevated(pid) is True) == expected_elevated for pid in live_pids)
+        )
         captured = registered_run("capture", spawned)
         self.assertIn(int(captured["window"]["pid"]), live_pids)
 

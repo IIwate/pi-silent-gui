@@ -100,6 +100,12 @@ def _kernel32():
         wintypes.DWORD,
     ]
     kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.GetLongPathNameW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    kernel32.GetLongPathNameW.restype = wintypes.DWORD
     kernel32.SetFileInformationByHandle.argtypes = [
         wintypes.HANDLE,
         ctypes.c_int,
@@ -138,7 +144,19 @@ def _local_appdata() -> Path:
 
 
 def _lexical_path(path: str | os.PathLike[str]) -> Path:
-    return Path(os.path.abspath(os.path.normpath(os.fspath(path))))
+    normalized = os.path.abspath(os.path.normpath(os.fspath(path)))
+    if is_windows():
+        try:
+            kernel32 = _kernel32()
+            size = kernel32.GetLongPathNameW(normalized, None, 0)
+            if size:
+                buffer = ctypes.create_unicode_buffer(size + 1)
+                length = kernel32.GetLongPathNameW(normalized, buffer, len(buffer))
+                if length and length < len(buffer):
+                    normalized = buffer.value
+        except Exception:
+            pass
+    return Path(normalized)
 
 
 def _path_key(path: str | os.PathLike[str]) -> str:

@@ -12,7 +12,7 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
-from common import _close_handles, _lexical_path, _open_directory_chain
+from common import _close_handles, _lexical_path, _open_directory_chain, _path_key
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -168,7 +168,7 @@ def _validated_pending_path(path: Path, pending_path: str | Path | None) -> Path
         return None
     pending = _lexical_path(pending_path)
     if (
-        pending.parent != path.parent
+        _path_key(pending.parent) != _path_key(path.parent)
         or not pending.name.startswith(f".{path.name}.")
         or not pending.name.endswith(".tmp")
     ):

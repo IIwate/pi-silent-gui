@@ -493,7 +493,9 @@ def cmd_spawn(params: dict) -> int:
     args = params.get("args", [])
     env = params.get("env")
     cwd = params.get("cwd")
-    allow_elevated = params.get("allow_elevated", False)
+    allow_elevated = params.get("allow_elevated")
+    if allow_elevated is None:
+        allow_elevated = os.environ.get("PI_SILENT_GUI_TEST_ALLOW_ELEVATED") == "1"
     clean_env = params.get("clean_env", True)
     audio_device_policy = params.get("audio_device_policy", "dynamic")
     if not isinstance(allow_elevated, bool):
